@@ -1,0 +1,9 @@
+streamlit>=1.40
+folium
+streamlit-folium
+pandas
+numpy
+requests
+scikit-learn
+openpyxl
+gender-guesser
