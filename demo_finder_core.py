@@ -10,6 +10,7 @@ Reuses the field counting, owner typing, website search and HubSpot matching
 from complex_finder_v3.py, which must sit in the same folder.
 """
 
+import math
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -56,13 +57,20 @@ def geocode_address(address):
             "state": (a.get("ISO3166-2-lvl4") or "").replace("US-", "")}
 
 
+def bbox(lat, lon, radius_m):
+    """south,west,north,east box around a point (a box query is far faster than a circle)."""
+    dlat = radius_m / 111320
+    dlon = radius_m / (111320 * max(0.2, math.cos(math.radians(lat))))
+    return f"({lat - dlat:.5f},{lon - dlon:.5f},{lat + dlat:.5f},{lon + dlon:.5f})"
+
+
 @lru_cache(maxsize=128)
 def fetch_area(lat, lon, radius_m):
-    """Fields, tracks and named parks/schools/stadiums around a point."""
-    near = f"(around:{int(radius_m)},{lat:.5f},{lon:.5f})"
-    wide = f"(around:{int(radius_m + cf.NAME_MATCH_M)},{lat:.5f},{lon:.5f})"   # names just past the edge
+    """Fields, tracks and named parks/schools/stadiums around a point. Trimmed to the exact radius later."""
+    near = bbox(lat, lon, radius_m)
+    wide = bbox(lat, lon, radius_m + cf.NAME_MATCH_M)       # names just past the edge
     q = f"""
-    [out:json][timeout:180];
+    [out:json][timeout:120];
     (
       nwr["leisure"="pitch"]["sport"~"{cf.FIELD_SPORTS}|{cf.TRACK_SPORTS}"]{near};
       nwr["leisure"="track"]["sport"~"{cf.TRACK_SPORTS}"]{near};
@@ -71,16 +79,21 @@ def fetch_area(lat, lon, radius_m):
     );
     out center tags;
     """
-    problem = ""
+    problems = []
     for url in OVERPASS_URLS:
-        try:
-            r = requests.post(url, data={"data": q}, headers=HEADERS, timeout=200)
-            if r.status_code == 200:
-                return r.json()
-            problem = f"{url} answered {r.status_code}"
-        except Exception as e:
-            problem = str(e)
-    raise RuntimeError(f"The OpenStreetMap servers didn't answer ({problem}). Wait a minute and try again.")
+        for attempt in range(3):
+            try:
+                r = requests.post(url, data={"data": q}, headers=HEADERS, timeout=150)
+                if r.status_code == 200:
+                    return r.json()
+                problems.append(f"{url.split('/')[2]}: {r.status_code}")
+                if r.status_code not in (429, 502, 503, 504):
+                    break                                  # a real error, not "busy" - try the next server
+            except Exception as e:
+                problems.append(f"{url.split('/')[2]}: {type(e).__name__}")
+            time.sleep(5 * (attempt + 1))                  # busy: wait 5s, then 10s
+    raise RuntimeError("The OpenStreetMap servers didn't answer (" + "; ".join(problems) +
+                       "). Wait a few minutes and try again.")
 
 
 _last_nominatim = [0.0]
